@@ -44,7 +44,7 @@ warmup_steps = 100
 
 
 def main(
-    data_dir: str = "data/alpaca", 
+    data_dir: str = "data/alpaca",
     pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
     out_dir: str = "out/lora/alpaca",
 ):
@@ -67,11 +67,30 @@ def main(
         model = LLaMA(config)
         # strict=False because missing keys due to LoRA weights not contained in checkpoint state
         model.load_state_dict(checkpoint, strict=False)
-    
+
+    # import pdb; pdb.set_trace()
     mark_only_lora_as_trainable(model)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     model, optimizer = fabric.setup(model, optimizer)
+
+    import transformer_engine.common.recipe as te_recipe
+    from transformer_engine.pytorch import fp8_autocast
+
+    kwargs={}
+    fp8_recipe = te_recipe.DelayedScaling(**kwargs)
+    cuda_device_capacity = torch.cuda.get_device_capability()
+    fp8_enabled = cuda_device_capacity[0] >= 9 or (
+        cuda_device_capacity[0] == 8 and cuda_device_capacity[1] >= 9
+    )
+    if not fp8_enabled:
+        print(
+            f"The current device has compute capability of {cuda_device_capacity} which is "
+            "insufficient for FP8 mixed precision training (requires a GPU Hopper/Ada Lovelace "
+            "or higher, compute capability of 8.9 or higher). Will use FP16 instead."
+        )
+    model.forward = fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe)(model.forward)
+
     train(fabric, model, optimizer, train_data, val_data, out_dir)
 
     # Save the final LoRA checkpoint at the end of training
@@ -112,7 +131,7 @@ def train(
             optimizer.step()
             optimizer.zero_grad()
             step_count += 1
-                
+
             if step_count % eval_interval == 0:
                 val_loss = validate(fabric, model, val_data)
                 fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
@@ -160,7 +179,7 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
 
     # produce an example:
     instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
-    
+
     output = generate_response(model, instruction)
     fabric.print(instruction)
     fabric.print(output)
@@ -174,7 +193,7 @@ def loss_fn(logits, targets):
     targets = targets[..., 1:].contiguous()
     loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
     return loss
-    
+
 
 def get_batch(fabric: L.Fabric, data: list):
     ix = torch.randint(len(data), (micro_batch_size,))
@@ -205,7 +224,7 @@ if __name__ == "__main__":
     # Uncomment this line if you see an error: "Expected is_sm80 to be true, but got false"
     # torch.backends.cuda.enable_flash_sdp(False)
     torch.set_float32_matmul_precision("high")
-    
+
     from jsonargparse.cli import CLI
 
     CLI(main)

@@ -18,9 +18,9 @@ from dataclasses import dataclass
 
 class LoRALayer():
     def __init__(
-        self, 
-        r: int, 
-        lora_alpha: int, 
+        self,
+        r: int,
+        lora_alpha: int,
         lora_dropout: float,
         merge_weights: bool,
     ):
@@ -35,22 +35,36 @@ class LoRALayer():
         self.merged = False
         self.merge_weights = merge_weights
 
+from transformer_engine.pytorch.module import Linear as TELinear
+# class TELinear(te.pytorch.module.Linear):
+#     def __init__(self,
+#                  in_features,
+#                  out_features,
+#                  bias=False,
+#                  **kwargs):
+#         super().__init__(self,
+#                          in_features=in_features,
+#                          out_features=out_features,
+#                          bias=bias
+#                          )
 
-class MergedLinear(nn.Linear, LoRALayer):
+class MergedLinear(TELinear, LoRALayer):
     # LoRA implemented in a dense layer
     def __init__(
-        self, 
-        in_features: int, 
-        out_features: int, 
-        r: int = 0, 
-        lora_alpha: int = 1, 
+        self,
+        in_features: int,
+        out_features: int,
+        r: int = 0,
+        lora_alpha: int = 1,
         lora_dropout: float = 0.,
         enable_lora: List[bool] = [False],
         fan_in_fan_out: bool = False,
         merge_weights: bool = True,
         **kwargs
     ):
-        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+
+        # nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        TELinear.__init__(self, in_features=in_features, out_features=out_features)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                            merge_weights=merge_weights)
         assert out_features % len(enable_lora) == 0, \
@@ -78,7 +92,7 @@ class MergedLinear(nn.Linear, LoRALayer):
             self.weight.data = self.weight.data.T
 
     def reset_parameters(self):
-        nn.Linear.reset_parameters(self)
+        # nn.Linear.reset_parameters(self)
         if hasattr(self, 'lora_A'):
             # initialize A the same way as the default for nn.Linear and B to zero
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
@@ -96,7 +110,7 @@ class MergedLinear(nn.Linear, LoRALayer):
     def train(self, mode: bool = True):
         def T(w):
             return w.T if self.fan_in_fan_out else w
-        nn.Linear.train(self, mode)
+        TELinear.train(self, mode)
 
         # if train(True) -> unmerge unless we already have them unmerged
         # if train(False) -> merge unless we already have them merged
@@ -105,8 +119,8 @@ class MergedLinear(nn.Linear, LoRALayer):
         if self.merge_weights and should:
             if self.r > 0 and any(self.enable_lora):
                 delta_w = F.conv1d(
-                    self.lora_A.data.unsqueeze(0), 
-                    self.lora_B.data.unsqueeze(-1), 
+                    self.lora_A.data.unsqueeze(0),
+                    self.lora_B.data.unsqueeze(-1),
                     groups=sum(self.enable_lora)
                 ).squeeze(0)
                 # -1: W = W - delta_W (unmerge), +1: W = W + delta_W (merge)
@@ -120,15 +134,16 @@ class MergedLinear(nn.Linear, LoRALayer):
         if self.merged:
             return F.linear(x, T(self.weight), bias=self.bias)
         else:
-            result = F.linear(x, T(self.weight), bias=self.bias)
+            # result = F.linear(x, T(self.weight), bias=self.bias)
+            result = TELinear.forward(self, x)
             if self.r > 0:
                 after_A = F.linear(self.lora_dropout(x), self.lora_A)
                 after_B = F.conv1d(
-                    after_A.transpose(-2, -1), 
-                    self.lora_B.unsqueeze(-1), 
+                    after_A.transpose(-2, -1),
+                    self.lora_B.unsqueeze(-1),
                     groups=sum(self.enable_lora)
                 ).transpose(-2, -1)
-                result += self.zero_pad(after_B) * self.scaling
+                result = result + self.zero_pad(after_B) * self.scaling
             return result
 
 
